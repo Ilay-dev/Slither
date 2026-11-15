@@ -422,7 +422,8 @@ export function SlitherArena({
                 isMe ? steerAngleRef.current : s.targetAngle,
                 s.speed,
                 s.radius,
-                snapAgeSec
+                snapAgeSec,
+                snap.arenaRadius
               );
             }
             smoothMap.set(s.id, smooth);
@@ -450,12 +451,19 @@ export function SlitherArena({
               predictedTarget,
               predictedSpeed,
               s.radius,
-              dtSec
+              dtSec,
+              snap.arenaRadius
             );
 
             // 2. Softly reconcile toward extrapolated authoritative snapshot
-            const extHeadX = s.pts[0] + Math.cos(s.angle) * s.speed * snapAgeSec;
-            const extHeadY = s.pts[1] + Math.sin(s.angle) * s.speed * snapAgeSec;
+            let extHeadX = s.pts[0] + Math.cos(s.angle) * s.speed * snapAgeSec;
+            let extHeadY = s.pts[1] + Math.sin(s.angle) * s.speed * snapAgeSec;
+            const extDist = Math.hypot(extHeadX, extHeadY);
+            const maxExtDist = Math.max(0, snap.arenaRadius - s.radius);
+            if (extDist > maxExtDist && extDist > 0.0001) {
+              extHeadX = (extHeadX / extDist) * maxExtDist;
+              extHeadY = (extHeadY / extDist) * maxExtDist;
+            }
             smooth.pts[0].x += (extHeadX - smooth.pts[0].x) * headReconcileRate;
             smooth.pts[0].y += (extHeadY - smooth.pts[0].y) * headReconcileRate;
 

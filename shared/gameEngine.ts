@@ -158,7 +158,8 @@ export function stepClientSnakeKinematics(
   targetAngle: number,
   speed: number,
   radius: number,
-  dtSec: number
+  dtSec: number,
+  arenaRadius: number = ARENA_RADIUS
 ): number {
   if (pts.length === 0 || dtSec <= 0) return angle;
 
@@ -170,6 +171,13 @@ export function stepClientSnakeKinematics(
   const head = pts[0];
   head.x += Math.cos(nextAngle) * speed * dtSec;
   head.y += Math.sin(nextAngle) * speed * dtSec;
+
+  const headDist = Math.hypot(head.x, head.y);
+  const maxHeadDist = Math.max(0, arenaRadius - radius);
+  if (headDist > maxHeadDist && headDist > 0.0001) {
+    head.x = (head.x / headDist) * maxHeadDist;
+    head.y = (head.y / headDist) * maxHeadDist;
+  }
 
   for (let i = 1; i < pts.length; i++) {
     const prev = pts[i - 1];
@@ -729,10 +737,17 @@ function advanceSnake(world: InternalWorld, snake: InternalSnake, dtSec: number,
     snake.speed = BASE_SPEED;
   }
 
-  // Move head
+  // Move head & clamp to circular arena border (no border damage)
   const head = snake.segments[0];
   head.x += Math.cos(snake.angle) * snake.speed * dtSec;
   head.y += Math.sin(snake.angle) * snake.speed * dtSec;
+
+  const headDist = Math.hypot(head.x, head.y);
+  const maxHeadDist = Math.max(0, world.arenaRadius - snake.radius);
+  if (headDist > maxHeadDist && headDist > 0.0001) {
+    head.x = (head.x / headDist) * maxHeadDist;
+    head.y = (head.y / headDist) * maxHeadDist;
+  }
 
   // Maintain segment chain following
   for (let i = 1; i < snake.segments.length; i++) {
@@ -833,16 +848,7 @@ function resolveCollisions(world: InternalWorld): void {
     }
   };
 
-  // 1. Arena border check
-  for (const snake of world.snakes) {
-    if (!snake.alive || snake.segments.length === 0) continue;
-    const head = snake.segments[0];
-    if (Math.hypot(head.x, head.y) + snake.radius >= world.arenaRadius) {
-      markDeath(snake, null, 'Arena-Wand');
-    }
-  }
-
-  // 2. Snake vs Snake collisions
+  // 1. Snake vs Snake collisions (arena border is solid and deals no damage)
   for (let i = 0; i < world.snakes.length; i++) {
     const a = world.snakes[i];
     if (!a.alive || a.segments.length === 0 || a.spawnProtectionMs > 0) continue;

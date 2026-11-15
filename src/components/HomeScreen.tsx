@@ -217,7 +217,7 @@ export function HomeScreen({
                 Sammle leuchtende Orbs ein, um zu wachsen — schneide Gegnern den Weg ab, damit sie an
                 deinem Körper explodieren.
               </li>
-              <li>Berührst du einen Gegner oder die rote Arena-Wand, bist du raus (sofortiger Respawn).</li>
+              <li>Berührst du den Körper eines Gegners, bist du raus (sofortiger Respawn). Die Arena-Wand begrenzt nur das Spielfeld.</li>
             </ul>
           </div>
         )}

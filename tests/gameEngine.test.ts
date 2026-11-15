@@ -10,6 +10,7 @@ import {
   createRoomConfig,
   createWorld,
   getTargetSegmentCount,
+  killSnake,
   serializeWorld,
   setSnakeInput,
   stepClientSnakeKinematics,
@@ -109,7 +110,7 @@ describe('Slither gameEngine', () => {
     expect(world.orbs.length).toBeGreaterThan(orbsBeforeBoost);
   });
 
-  it('kills snake on arena wall collision and drops loot trail', () => {
+  it('blocks snake at arena wall without dealing damage', () => {
     const world = createWorld(createRoomConfig(0), [
       { id: 'p1', name: 'EdgeRunner', colorId: 'crimson' },
     ]);
@@ -123,13 +124,16 @@ describe('Slither gameEngine', () => {
     snake.targetAngle = 0;
     snake.spawnProtectionMs = 0;
 
-    const orbsBefore = world.orbs.length;
-    stepWorld(world, 50);
+    for (let i = 0; i < 10; i++) {
+      stepWorld(world, 50);
+    }
 
-    expect(snake.alive).toBe(false);
-    expect(snake.eliminatedBy).toBe('Arena-Wand');
-    expect(world.orbs.length).toBeGreaterThan(orbsBefore);
-    expect(world.killFeed[0]?.victimName).toBe('EdgeRunner');
+    expect(snake.alive).toBe(true);
+    expect(snake.eliminatedBy).toBeNull();
+    expect(Math.hypot(snake.segments[0].x, snake.segments[0].y)).toBeLessThanOrEqual(
+      ARENA_RADIUS - snake.radius + 1e-4
+    );
+    expect(world.killFeed).toHaveLength(0);
   });
 
   it('credits kill when one snake runs head-first into another snake body', () => {
@@ -174,9 +178,7 @@ describe('Slither gameEngine', () => {
     ]);
     const bot = world.snakes.find((s) => s.isBot)!;
     bot.spawnProtectionMs = 0;
-    // Force bot into border wall
-    bot.segments[0] = { x: ARENA_RADIUS, y: 0 };
-    stepWorld(world, 33);
+    killSnake(world, bot, null, 'Test');
     expect(bot.alive).toBe(false);
 
     // Advance past respawn delay
