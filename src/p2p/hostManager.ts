@@ -66,8 +66,8 @@ export interface BrowserSlitherRoom {
   countdownSeconds: number | null;
   countdownTimer: ReturnType<typeof setInterval> | null;
   simTimer: ReturnType<typeof setInterval> | null;
-  broadcastTimer: ReturnType<typeof setInterval> | null;
   lastStepAt: number;
+  simSubTick: number;
   world: InternalWorld | null;
 }
 
@@ -117,8 +117,8 @@ export class BrowserHostManager {
       countdownSeconds: null,
       countdownTimer: null,
       simTimer: null,
-      broadcastTimer: null,
       lastStepAt: Date.now(),
+      simSubTick: 0,
       world: null,
     };
   }
@@ -160,10 +160,6 @@ export class BrowserHostManager {
       clearInterval(this.room.simTimer);
       this.room.simTimer = null;
     }
-    if (this.room.broadcastTimer) {
-      clearInterval(this.room.broadcastTimer);
-      this.room.broadcastTimer = null;
-    }
   }
 
   private buildPublicPlayers(): PublicLobbyPlayer[] {
@@ -179,7 +175,10 @@ export class BrowserHostManager {
     }));
   }
 
-  public broadcast(precomputedSnapshot?: WorldSnapshot | null): void {
+  public broadcast(
+    precomputedSnapshot?: WorldSnapshot | null,
+    options?: { localOnly?: boolean }
+  ): void {
     const publicPlayers = this.buildPublicPlayers();
     const worldSnap =
       precomputedSnapshot !== undefined
@@ -189,19 +188,20 @@ export class BrowserHostManager {
           : null;
 
     for (const player of this.room.players) {
-      if (player.socketId && player.connected) {
-        const state: ClientRoomState = {
-          roomCode: this.room.code,
-          phase: this.room.phase,
-          myPlayerId: player.id,
-          hostId: this.room.hostId,
-          config: { ...this.room.config },
-          players: publicPlayers,
-          countdownSeconds: this.room.countdownSeconds,
-          world: worldSnap,
-        };
-        this.onBroadcast(player.socketId, state);
-      }
+      if (!player.socketId || !player.connected) continue;
+      if (options?.localOnly && player.socketId !== 'HOST_LOCAL') continue;
+
+      const state: ClientRoomState = {
+        roomCode: this.room.code,
+        phase: this.room.phase,
+        myPlayerId: player.id,
+        hostId: this.room.hostId,
+        config: { ...this.room.config },
+        players: publicPlayers,
+        countdownSeconds: this.room.countdownSeconds,
+        world: worldSnap,
+      };
+      this.onBroadcast(player.socketId, state);
     }
   }
 
@@ -598,12 +598,13 @@ export class BrowserHostManager {
       }))
     );
     this.room.lastStepAt = Date.now();
+    this.room.simSubTick = 0;
 
-    // 30 Hz authoritative physics loop
+    // Unified 60 Hz authoritative physics loop (no beat-frequency timer drift)
     this.room.simTimer = setInterval(() => {
       if (this.room.phase !== 'playing' || !this.room.world) return;
       const now = Date.now();
-      const dt = Math.max(16, Math.min(60, now - this.room.lastStepAt));
+      const dt = Math.max(8, Math.min(45, now - this.room.lastStepAt));
       this.room.lastStepAt = now;
       stepWorld(this.room.world, dt);
 
@@ -615,13 +616,15 @@ export class BrowserHostManager {
           p.kills = s.totalKills;
         }
       }
-    }, 33);
 
-    // 20 Hz world snapshot broadcast loop
-    this.room.broadcastTimer = setInterval(() => {
-      if (this.room.phase !== 'playing' || !this.room.world) return;
-      this.broadcast();
-    }, 50);
+      this.room.simSubTick += 1;
+      const hasRemoteGuests = this.room.players.some(
+        (p) => p.socketId && p.socketId !== 'HOST_LOCAL' && p.connected
+      );
+      const sendToGuests = hasRemoteGuests && this.room.simSubTick % 2 === 0;
+      const snap = serializeWorld(this.room.world);
+      this.broadcast(snap, { localOnly: !sendToGuests });
+    }, 16);
 
     this.broadcast();
   }

@@ -128,6 +128,7 @@ export interface CompactSnakeSnapshot {
   score: number;
   kills: number;
   angle: number;
+  targetAngle: number;
   speed: number;
   radius: number;
   boosting: boolean;

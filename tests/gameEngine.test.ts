@@ -12,6 +12,7 @@ import {
   getTargetSegmentCount,
   serializeWorld,
   setSnakeInput,
+  stepClientSnakeKinematics,
   stepWorld,
   syncBotCount,
 } from '../shared/gameEngine.ts';
@@ -208,6 +209,38 @@ describe('Slither gameEngine', () => {
     stepWorld(world, 33);
     // Target angle should point back toward center (around +-PI)
     expect(Math.abs(bot.targetAngle)).toBeGreaterThan(Math.PI / 2);
+  });
+
+  it('client kinematic prediction matches sub-pixel host steering and maintains segment spacing', () => {
+    const world = createWorld(createRoomConfig(0), [
+      { id: 'p1', name: 'Responsive', colorId: 'emerald' },
+    ]);
+    const snake = world.snakes[0];
+    snake.segments = Array.from({ length: 12 }, (_, i) => ({
+      x: -i * SEGMENT_SPACING,
+      y: 0,
+    }));
+    snake.angle = 0;
+    snake.targetAngle = 0;
+    setSnakeInput(world, 'p1', 0.85, false);
+
+    const pts = snake.segments.map((p) => ({ x: p.x, y: p.y }));
+    const predAngle = stepClientSnakeKinematics(
+      pts,
+      0,
+      0.85,
+      BASE_SPEED,
+      snake.radius,
+      0.016
+    );
+    stepWorld(world, 16);
+
+    expect(predAngle).toBeCloseTo(snake.angle, 3);
+    expect(pts[0].x).toBeCloseTo(snake.segments[0].x, 1);
+    expect(pts[0].y).toBeCloseTo(snake.segments[0].y, 1);
+
+    const snap = serializeWorld(world);
+    expect(snap.snakes[0].targetAngle).toBeCloseTo(0.85, 3);
   });
 });
 

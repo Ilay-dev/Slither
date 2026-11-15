@@ -19,6 +19,7 @@ export default function App() {
   const {
     connected,
     roomState,
+    worldStreamRef,
     errorBanner,
     clearError,
     createRoom,
@@ -130,6 +131,7 @@ export default function App() {
       ) : (
         <SlitherArena
           room={roomState}
+          worldStreamRef={worldStreamRef}
           connected={connected}
           soundEnabled={soundEnabled}
           onToggleSound={toggleSound}

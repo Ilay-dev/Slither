@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Peer, { type DataConnection } from 'peerjs';
+import { normalizeAngle } from '../../shared/gameEngine.ts';
 import type {
   ClientRoomState,
   RoomActionResponse,
   SessionCredentials,
   SnakeColorId,
+  WorldSnapshot,
 } from '../../shared/types.ts';
 import { BrowserHostManager, generateBrowserRoomCode } from '../p2p/hostManager.ts';
 
@@ -89,11 +91,60 @@ export function useSlitherSocket() {
   >(new Map());
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastInputSentAtRef = useRef<number>(0);
+  const lastAngleSentRef = useRef<number>(0);
   const lastBoostSentRef = useRef<boolean>(false);
+
+  const worldStreamRef = useRef<{ snapshot: WorldSnapshot; receivedAt: number } | null>(null);
+  const lastHudCommitAtRef = useRef<number>(0);
+  const prevStateMetaRef = useRef<{
+    phase: string;
+    playersLen: number;
+    botCount: number;
+    myAlive: boolean | null;
+  }>({ phase: '', playersLen: 0, botCount: -1, myAlive: null });
 
   const [connected, setConnected] = useState(true);
   const [roomState, setRoomState] = useState<ClientRoomState | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+
+  const applyIncomingState = useCallback((state: ClientRoomState | null) => {
+    if (!state) {
+      worldStreamRef.current = null;
+      prevStateMetaRef.current = { phase: '', playersLen: 0, botCount: -1, myAlive: null };
+      setRoomState(null);
+      return;
+    }
+
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (state.world) {
+      worldStreamRef.current = { snapshot: state.world, receivedAt: now };
+    } else if (state.phase !== 'playing') {
+      worldStreamRef.current = null;
+    }
+
+    const mySnake = state.world?.snakes.find((s) => s.id === state.myPlayerId);
+    const myAlive = mySnake ? mySnake.alive : null;
+    const prev = prevStateMetaRef.current;
+
+    const structuralChange =
+      state.phase !== 'playing' ||
+      state.world === null ||
+      prev.phase !== state.phase ||
+      prev.playersLen !== state.players.length ||
+      prev.botCount !== state.config.botCount ||
+      prev.myAlive !== myAlive;
+
+    if (structuralChange || now - lastHudCommitAtRef.current >= 66) {
+      lastHudCommitAtRef.current = now;
+      prevStateMetaRef.current = {
+        phase: state.phase,
+        playersLen: state.players.length,
+        botCount: state.config.botCount,
+        myAlive,
+      };
+      setRoomState(state);
+    }
+  }, []);
 
   const showError = useCallback((msg: string) => {
     setErrorBanner(msg);
@@ -216,11 +267,11 @@ export function useSlitherSocket() {
                 pending.resolve(data.response);
               }
             } else if (data.type === 'state') {
-              setRoomState(data.state);
+              applyIncomingState(data.state);
             } else if (data.type === 'kicked') {
               saveGuestSession(null);
               cleanupPeerResources();
-              setRoomState(null);
+              applyIncomingState(null);
               setErrorBanner(data.reason);
             }
           });
@@ -257,7 +308,7 @@ export function useSlitherSocket() {
               setErrorBanner('Der Host hat die Verbindung beendet.');
               saveGuestSession(null);
               cleanupPeerResources();
-              setRoomState(null);
+              applyIncomingState(null);
             }
           });
 
@@ -277,7 +328,7 @@ export function useSlitherSocket() {
         });
       });
     },
-    [cleanupPeerResources]
+    [applyIncomingState, cleanupPeerResources]
   );
 
   // Auto-rejoin guest session on page reload
@@ -331,7 +382,7 @@ export function useSlitherSocket() {
               botCount,
               (targetPeerId, state) => {
                 if (targetPeerId === 'HOST_LOCAL') {
-                  setRoomState(state);
+                  applyIncomingState(state);
                   return;
                 }
                 const conn = guestConnectionsRef.current.get(targetPeerId);
@@ -431,7 +482,7 @@ export function useSlitherSocket() {
         tryCreate();
       });
     },
-    [cleanupPeerResources]
+    [applyIncomingState, cleanupPeerResources]
   );
 
   const joinRoom = useCallback(
@@ -453,10 +504,10 @@ export function useSlitherSocket() {
       await sendRequestToHost({ type: 'action', action: 'room:leave' });
     }
     cleanupPeerResources();
-    setRoomState(null);
+    applyIncomingState(null);
     setErrorBanner(null);
     setConnected(true);
-  }, [cleanupPeerResources, sendRequestToHost]);
+  }, [applyIncomingState, cleanupPeerResources, sendRequestToHost]);
 
   const dispatchAction = useCallback(
     async (
@@ -498,10 +549,15 @@ export function useSlitherSocket() {
 
     const now = performance.now();
     const boostChanged = boosting !== lastBoostSentRef.current;
-    if (!boostChanged && now - lastInputSentAtRef.current < 30) {
+    const angleDelta = Math.abs(normalizeAngle(angle - lastAngleSentRef.current));
+    if (!boostChanged && angleDelta <= 0.015 && now - lastInputSentAtRef.current < 16) {
+      return;
+    }
+    if (!boostChanged && angleDelta < 0.002 && now - lastInputSentAtRef.current < 50) {
       return;
     }
     lastInputSentAtRef.current = now;
+    lastAngleSentRef.current = angle;
     lastBoostSentRef.current = boosting;
     conn.send({
       type: 'input',
@@ -550,6 +606,7 @@ export function useSlitherSocket() {
   return {
     connected,
     roomState,
+    worldStreamRef,
     errorBanner,
     showError,
     clearError,

@@ -15,10 +15,10 @@ import {
 
 export const INITIAL_SNAKE_SCORE = 50;
 export const MIN_BOOST_SCORE = 65;
-export const BASE_SPEED = 195;
-export const BOOST_SPEED = 340;
+export const BASE_SPEED = 210;
+export const BOOST_SPEED = 365;
 export const BOOST_COST_PER_SEC = 14;
-export const BASE_TURN_RATE = 4.4;
+export const BASE_TURN_RATE = 5.8;
 export const SEGMENT_SPACING = 11;
 export const MIN_SEGMENTS = 12;
 export const MAX_SEGMENTS = 140;
@@ -145,6 +145,45 @@ export function normalizeAngle(angle: number): number {
 
 export function getSnakeRadius(score: number): number {
   return 11 + Math.min(16, Math.sqrt(Math.max(0, score - INITIAL_SNAKE_SCORE)) * 0.48);
+}
+
+export function getTurnRate(radius: number): number {
+  const turnScale = Math.max(0.74, 1 - (radius - 11) * 0.015);
+  return BASE_TURN_RATE * turnScale;
+}
+
+export function stepClientSnakeKinematics(
+  pts: Vec2[],
+  angle: number,
+  targetAngle: number,
+  speed: number,
+  radius: number,
+  dtSec: number
+): number {
+  if (pts.length === 0 || dtSec <= 0) return angle;
+
+  const maxTurn = getTurnRate(radius) * dtSec;
+  const diff = normalizeAngle(targetAngle - angle);
+  const nextAngle =
+    Math.abs(diff) <= maxTurn ? targetAngle : normalizeAngle(angle + Math.sign(diff) * maxTurn);
+
+  const head = pts[0];
+  head.x += Math.cos(nextAngle) * speed * dtSec;
+  head.y += Math.sin(nextAngle) * speed * dtSec;
+
+  for (let i = 1; i < pts.length; i++) {
+    const prev = pts[i - 1];
+    const curr = pts[i];
+    const dx = curr.x - prev.x;
+    const dy = curr.y - prev.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > 0.0001) {
+      curr.x = prev.x + (dx / dist) * SEGMENT_SPACING;
+      curr.y = prev.y + (dy / dist) * SEGMENT_SPACING;
+    }
+  }
+
+  return nextAngle;
 }
 
 export function getTargetSegmentCount(score: number): number {
@@ -657,8 +696,7 @@ function advanceSnake(world: InternalWorld, snake: InternalSnake, dtSec: number,
   snake.radius = getSnakeRadius(snake.score);
 
   // Scale turn rate smoothly down as snake gets larger
-  const turnScale = Math.max(0.68, 1 - (snake.radius - 11) * 0.02);
-  const maxTurn = BASE_TURN_RATE * turnScale * dtSec;
+  const maxTurn = getTurnRate(snake.radius) * dtSec;
   const diff = normalizeAngle(snake.targetAngle - snake.angle);
   if (Math.abs(diff) <= maxTurn) {
     snake.angle = snake.targetAngle;
@@ -907,7 +945,10 @@ export function serializeWorld(world: InternalWorld): WorldSnapshot {
     const pts: number[] = [];
     if (s.alive) {
       for (let i = 0; i < s.segments.length; i++) {
-        pts.push(Math.round(s.segments[i].x), Math.round(s.segments[i].y));
+        pts.push(
+          Math.round(s.segments[i].x * 10) / 10,
+          Math.round(s.segments[i].y * 10) / 10
+        );
       }
     }
     return {
@@ -919,6 +960,7 @@ export function serializeWorld(world: InternalWorld): WorldSnapshot {
       score: Math.round(s.score),
       kills: s.kills,
       angle: Number(s.angle.toFixed(3)),
+      targetAngle: Number(s.targetAngle.toFixed(3)),
       speed: Math.round(s.speed),
       radius: Number(s.radius.toFixed(1)),
       boosting: s.boosting,

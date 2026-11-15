@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import {
   Bot,
   Check,
@@ -18,10 +18,13 @@ import {
   Zap,
 } from 'lucide-react';
 import {
+  BASE_SPEED,
+  BOOST_SPEED,
   MIN_BOOST_SCORE,
   clampBotCount,
   getOrbRadius,
   normalizeAngle,
+  stepClientSnakeKinematics,
 } from '../../shared/gameEngine.ts';
 import {
   MAX_BOT_COUNT,
@@ -34,8 +37,14 @@ import {
   type WorldSnapshot,
 } from '../../shared/types.ts';
 
+interface WorldStreamPacket {
+  snapshot: WorldSnapshot;
+  receivedAt: number;
+}
+
 interface SlitherArenaProps {
   room: ClientRoomState;
+  worldStreamRef?: RefObject<WorldStreamPacket | null>;
   connected: boolean;
   soundEnabled: boolean;
   onToggleSound: () => void;
@@ -74,6 +83,7 @@ interface BoostParticle {
 
 export function SlitherArena({
   room,
+  worldStreamRef,
   connected,
   soundEnabled,
   onToggleSound,
@@ -90,7 +100,9 @@ export function SlitherArena({
   onPlayStartSound,
 }: SlitherArenaProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const latestWorldRef = useRef<WorldSnapshot | null>(room.world);
+  const fallbackPacketRef = useRef<WorldStreamPacket | null>(
+    room.world ? { snapshot: room.world, receivedAt: typeof performance !== 'undefined' ? performance.now() : 0 } : null
+  );
   const myPlayerIdRef = useRef<string>(room.myPlayerId);
   const onSendInputRef = useRef(onSendInput);
 
@@ -98,8 +110,10 @@ export function SlitherArena({
   const cameraRef = useRef<{ x: number; y: number; zoom: number }>({ x: 0, y: 0, zoom: 1 });
   const particlesRef = useRef<BoostParticle[]>([]);
 
-  // Control state refs for zero-lag 60fps input capture
+  // Control state refs for zero-lag input capture
   const steerAngleRef = useRef<number>(0);
+  const mousePosRef = useRef<{ x: number; y: number } | null>(null);
+  const inputModeRef = useRef<'mouse' | 'keyboard' | 'touch'>('mouse');
   const mouseBoostRef = useRef<boolean>(false);
   const touchBoostRef = useRef<boolean>(false);
   const keysDownRef = useRef<Set<string>>(new Set());
@@ -110,7 +124,17 @@ export function SlitherArena({
   const [copiedCode, setCopiedCode] = useState(false);
   const [respawning, setRespawning] = useState(false);
 
-  latestWorldRef.current = room.world;
+  if (room.world) {
+    const curSnap = fallbackPacketRef.current?.snapshot;
+    if (!curSnap || curSnap.tick !== room.world.tick) {
+      fallbackPacketRef.current = {
+        snapshot: room.world,
+        receivedAt: typeof performance !== 'undefined' ? performance.now() : 0,
+      };
+    }
+  } else {
+    fallbackPacketRef.current = null;
+  }
   myPlayerIdRef.current = room.myPlayerId;
   onSendInputRef.current = onSendInput;
 
@@ -325,19 +349,34 @@ export function SlitherArena({
       const viewW = window.innerWidth;
       const viewH = window.innerHeight;
 
-      // Handle continuous keyboard turning (A/D or ArrowLeft/ArrowRight)
+      // Handle continuous mouse cursor tracking & keyboard turning
       const keys = keysDownRef.current;
       const turnLeft = keys.has('ArrowLeft') || keys.has('KeyA');
       const turnRight = keys.has('ArrowRight') || keys.has('KeyD');
       if (turnLeft || turnRight) {
+        inputModeRef.current = 'keyboard';
         const turnDir = (turnRight ? 1 : 0) - (turnLeft ? 1 : 0);
         if (turnDir !== 0) {
-          steerAngleRef.current = normalizeAngle(steerAngleRef.current + turnDir * 3.6 * dtSec);
+          steerAngleRef.current = normalizeAngle(steerAngleRef.current + turnDir * 4.2 * dtSec);
           onSendInputRef.current(steerAngleRef.current, isBoostActive());
+        }
+      } else if (inputModeRef.current === 'mouse' && mousePosRef.current !== null) {
+        const dx = mousePosRef.current.x - viewW / 2;
+        const dy = mousePosRef.current.y - viewH / 2;
+        if (Math.hypot(dx, dy) > 4) {
+          const nextAngle = Math.atan2(dy, dx);
+          if (Math.abs(normalizeAngle(nextAngle - steerAngleRef.current)) > 0.002) {
+            steerAngleRef.current = nextAngle;
+            onSendInputRef.current(steerAngleRef.current, isBoostActive());
+          }
         }
       }
 
-      const snap = latestWorldRef.current;
+      const packet = worldStreamRef?.current ?? fallbackPacketRef.current;
+      const snap = packet?.snapshot ?? null;
+      const snapAgeSec = packet
+        ? Math.min(0.08, Math.max(0, (now - packet.receivedAt) / 1000))
+        : 0;
       const smoothMap = smoothSnakesRef.current;
 
       // Clear background
@@ -346,16 +385,24 @@ export function SlitherArena({
 
       if (snap) {
         const aliveIds = new Set<string>();
-        const lerpRate = 1 - Math.exp(-22 * dtSec);
+        const headReconcileRate = 1 - Math.exp(-16 * dtSec);
+        const bodyReconcileRate = 1 - Math.exp(-9 * dtSec);
+        const radiusRate = 1 - Math.exp(-14 * dtSec);
 
         for (const s of snap.snakes) {
           if (!s.alive || s.pts.length < 2) continue;
           aliveIds.add(s.id);
 
-          let smooth = smoothMap.get(s.id);
+          const isMe = s.id === myPlayerIdRef.current;
           const segCount = Math.floor(s.pts.length / 2);
+          let smooth = smoothMap.get(s.id);
 
-          if (!smooth || smooth.pts.length !== segCount) {
+          const teleported =
+            smooth &&
+            smooth.pts.length > 0 &&
+            Math.hypot(s.pts[0] - smooth.pts[0].x, s.pts[1] - smooth.pts[0].y) > 220;
+
+          if (!smooth || teleported) {
             const pts: Array<{ x: number; y: number }> = [];
             for (let i = 0; i < segCount; i++) {
               pts.push({ x: s.pts[i * 2], y: s.pts[i * 2 + 1] });
@@ -368,28 +415,72 @@ export function SlitherArena({
               boosting: s.boosting,
               pts,
             };
+            if (snapAgeSec > 0.001) {
+              smooth.angle = stepClientSnakeKinematics(
+                smooth.pts,
+                smooth.angle,
+                isMe ? steerAngleRef.current : s.targetAngle,
+                s.speed,
+                s.radius,
+                snapAgeSec
+              );
+            }
             smoothMap.set(s.id, smooth);
           } else {
-            for (let i = 0; i < segCount; i++) {
-              const tx = s.pts[i * 2];
-              const ty = s.pts[i * 2 + 1];
-              const p = smooth.pts[i];
-              // Snap if huge teleport (respawn)
-              if (i === 0 && Math.hypot(tx - p.x, ty - p.y) > 220) {
-                for (let j = 0; j < segCount; j++) {
-                  smooth.pts[j].x = s.pts[j * 2];
-                  smooth.pts[j].y = s.pts[j * 2 + 1];
-                }
-                break;
-              }
-              p.x += (tx - p.x) * lerpRate;
-              p.y += (ty - p.y) * lerpRate;
+            // Adjust segment array length dynamically as snake grows/shrinks
+            while (smooth.pts.length < segCount) {
+              const tail = smooth.pts[smooth.pts.length - 1];
+              smooth.pts.push({ x: tail.x, y: tail.y });
             }
-            const angleDiff = normalizeAngle(s.angle - smooth.angle);
-            smooth.angle = normalizeAngle(smooth.angle + angleDiff * lerpRate);
-            smooth.radius += (s.radius - smooth.radius) * lerpRate;
+            while (smooth.pts.length > segCount && smooth.pts.length > 1) {
+              smooth.pts.pop();
+            }
+
+            // 1. Continuous 60/120/144 FPS kinematic prediction every frame
+            const predictedTarget = isMe ? steerAngleRef.current : s.targetAngle;
+            const predictedSpeed = isMe
+              ? isBoostActive() && s.score > MIN_BOOST_SCORE
+                ? BOOST_SPEED
+                : BASE_SPEED
+              : s.speed;
+
+            smooth.angle = stepClientSnakeKinematics(
+              smooth.pts,
+              smooth.angle,
+              predictedTarget,
+              predictedSpeed,
+              s.radius,
+              dtSec
+            );
+
+            // 2. Softly reconcile toward extrapolated authoritative snapshot
+            const extHeadX = s.pts[0] + Math.cos(s.angle) * s.speed * snapAgeSec;
+            const extHeadY = s.pts[1] + Math.sin(s.angle) * s.speed * snapAgeSec;
+            smooth.pts[0].x += (extHeadX - smooth.pts[0].x) * headReconcileRate;
+            smooth.pts[0].y += (extHeadY - smooth.pts[0].y) * headReconcileRate;
+
+            for (let i = 1; i < segCount; i++) {
+              const sx = s.pts[i * 2];
+              const sy = s.pts[i * 2 + 1];
+              const prevSx = s.pts[(i - 1) * 2];
+              const prevSy = s.pts[(i - 1) * 2 + 1];
+              const dx = prevSx - sx;
+              const dy = prevSy - sy;
+              const segDist = Math.hypot(dx, dy);
+              const shift = segDist > 0.001 ? (s.speed * snapAgeSec) / segDist : 0;
+              const targetX = sx + dx * Math.min(1, shift);
+              const targetY = sy + dy * Math.min(1, shift);
+              smooth.pts[i].x += (targetX - smooth.pts[i].x) * bodyReconcileRate;
+              smooth.pts[i].y += (targetY - smooth.pts[i].y) * bodyReconcileRate;
+            }
+
+            if (!isMe) {
+              const angleDiff = normalizeAngle(s.angle - smooth.angle);
+              smooth.angle = normalizeAngle(smooth.angle + angleDiff * (1 - Math.exp(-12 * dtSec)));
+            }
+            smooth.radius += (s.radius - smooth.radius) * radiusRate;
             smooth.score = s.score;
-            smooth.boosting = s.boosting;
+            smooth.boosting = isMe ? isBoostActive() && s.score > MIN_BOOST_SCORE : s.boosting;
           }
 
           // Emit subtle boost particles from tail
@@ -415,16 +506,18 @@ export function SlitherArena({
           }
         }
 
-        // Camera target: own snake head, or #1 leader when dead/spectating
+        // Camera target: own snake head (tight lock), or #1 leader when dead/spectating
         let targetCamX = cameraRef.current.x;
         let targetCamY = cameraRef.current.y;
         let targetZoom = 1;
+        let trackingSelf = false;
 
         const mySmooth = smoothMap.get(myPlayerIdRef.current);
         if (mySmooth && mySmooth.pts.length > 0) {
           targetCamX = mySmooth.pts[0].x;
           targetCamY = mySmooth.pts[0].y;
           targetZoom = Math.max(0.62, 1.0 - (mySmooth.radius - 11) * 0.018);
+          trackingSelf = true;
         } else {
           const leaderId = snap.leaderboard[0]?.id;
           const leaderSmooth = leaderId ? smoothMap.get(leaderId) : undefined;
@@ -435,10 +528,10 @@ export function SlitherArena({
           }
         }
 
-        const camLerp = 1 - Math.exp(-10 * dtSec);
+        const camLerp = trackingSelf ? 1 - Math.exp(-42 * dtSec) : 1 - Math.exp(-12 * dtSec);
         cameraRef.current.x += (targetCamX - cameraRef.current.x) * camLerp;
         cameraRef.current.y += (targetCamY - cameraRef.current.y) * camLerp;
-        cameraRef.current.zoom += (targetZoom - cameraRef.current.zoom) * (1 - Math.exp(-4 * dtSec));
+        cameraRef.current.zoom += (targetZoom - cameraRef.current.zoom) * (1 - Math.exp(-5 * dtSec));
 
         const camX = cameraRef.current.x;
         const camY = cameraRef.current.y;
@@ -654,7 +747,7 @@ export function SlitherArena({
       window.cancelAnimationFrame(rafId);
       window.removeEventListener('resize', resize);
     };
-  }, [isBoostActive]);
+  }, [isBoostActive, worldStreamRef]);
 
   // Pointer & Touch Handlers on Canvas
   const updateAngleFromScreenPoint = (clientX: number, clientY: number) => {
@@ -669,11 +762,15 @@ export function SlitherArena({
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    inputModeRef.current = 'mouse';
+    mousePosRef.current = { x: e.clientX, y: e.clientY };
     updateAngleFromScreenPoint(e.clientX, e.clientY);
   };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (e.button === 0) {
+      inputModeRef.current = 'mouse';
+      mousePosRef.current = { x: e.clientX, y: e.clientY };
       mouseBoostRef.current = true;
       updateAngleFromScreenPoint(e.clientX, e.clientY);
       onSendInput(steerAngleRef.current, true);
@@ -688,12 +785,14 @@ export function SlitherArena({
   const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
     const touch = e.changedTouches[0];
     if (!touch) return;
+    inputModeRef.current = 'touch';
     touchOriginRef.current = { id: touch.identifier, x: touch.clientX, y: touch.clientY };
     updateAngleFromScreenPoint(touch.clientX, touch.clientY);
   };
 
   const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
     const origin = touchOriginRef.current;
+    inputModeRef.current = 'touch';
     for (let i = 0; i < e.changedTouches.length; i++) {
       const t = e.changedTouches[i];
       if (origin && t.identifier === origin.id) {
