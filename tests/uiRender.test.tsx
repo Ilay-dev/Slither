@@ -25,6 +25,8 @@ describe('SLITHER UI components smoke render', () => {
     expect(htmlNormal).toContain('SLITHER');
     expect(htmlNormal).toContain('Neuen Room erstellen (Host)');
     expect(htmlNormal).toContain('Einem Room beitreten');
+    expect(htmlNormal).toContain('href="https://gundigame.vercel.app"');
+    expect(htmlNormal).toContain('Zurück zum Dashboard');
 
     const htmlInvite = renderToString(
       <HomeScreen
@@ -40,6 +42,8 @@ describe('SLITHER UI components smoke render', () => {
     expect(htmlInvite).toContain('SLT999');
     expect(htmlInvite).toContain('Room beitreten');
     expect(htmlInvite).toContain('Neuen Room erstellen');
+    expect(htmlInvite).toContain('href="https://gundigame.vercel.app"');
+    expect(htmlInvite).toContain('Zurück zum Dashboard');
   });
 
   it('renders LobbyScreen and SlitherArena HUD + Death Modal cleanly', () => {
